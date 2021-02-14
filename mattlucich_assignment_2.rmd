@@ -9,7 +9,7 @@ editor_options:
 ---
 
 ```{r global_options, include=FALSE}
-knitr::opts_chunk$set(eval = TRUE, results = FALSE, fig.show = "hide", message = FALSE)
+knitr::opts_chunk$set(eval = FALSE, results = FALSE, fig.show = "hide", message = FALSE)
 ```
 
 ```{r load-packages}
@@ -20,6 +20,7 @@ library(stringr)
 
 ### Overview and Workflow
 
+To develop a common pipeline: data was extracted from a CSV, loaded into multiple MySQL database tables, and briefly explored for high-level insights. First, consideration was put into the database schema, which ended up including three tables in order to enforce table normalization. Next, an AWS RDS database was created and connected to. Then, tables were created, while taking care to properly specify rules regarding nulls, data types, and value lengths. The data was inserted into the tables after manipulation that converted the data from a CSV, to data frames, to SQL. Lastly, the data was explored for insights, which will be discussed further in the conclusion.
 
 
 ### Database Schema
@@ -29,7 +30,7 @@ library(stringr)
 
 ### Connecting to AWS RDS database
 
-```{r connect-db, results = True}
+```{r connect-db}
 
 # External database (optional)
 con <- DBI::dbConnect(RMySQL::MySQL(), 
@@ -47,27 +48,27 @@ dbSendStatement(con, "CREATE DATABASE IF NOT EXISTS cunysps;")
 
 # (skip if using SQLite) Select database
 dbSendStatement(con, "USE cunysps;")
+
 ```
 
 
 ### Create tables
 
-```{r create-tables, results = True}
+```{r create-tables}
+
 # Create friends table
-dbSendStatement(con, "CREATE TABLE IF NOT EXISTS friends2
+dbSendStatement(con, "CREATE TABLE IF NOT EXISTS friends
   ( 
    friend_id        INT(3) PRIMARY KEY, -- Autoincrement
    friend_name      VARCHAR(50) NOT NULL
   )")
 
-
 # Create movies table
 dbSendStatement(con, "CREATE TABLE IF NOT EXISTS movies
   ( 
-   movie_id         INT(3) PRIMARY KEY AUTO_INCREMENT, 
+   movie_id         INT(3) PRIMARY KEY, -- Autoincrement
    movie_name       VARCHAR(100) NOT NULL
   )")
-
 
 # Create friends_movie_ratings table
 dbSendStatement(con, "CREATE TABLE IF NOT EXISTS friends_movie_ratings
@@ -82,58 +83,62 @@ dbSendStatement(con, "CREATE TABLE IF NOT EXISTS friends_movie_ratings
 
 ### Insert Values
 
-```{r insert-db, results = True}
+```{r insert-db}
+
 df_survey <- read.csv("friends_movie_ratings.csv")
-df_survey <- select(df_survey, friend_id, movie_id, movie_rating)
+
+# Subset of data for friends table, add friend_id column
 df_friends <- select(df_survey, friend_name)
-head(df_survey)
+df_friends <- distinct(df_friends, friend_name)
+df_friends$friend_id <- seq.int(nrow(df_friends))
 
-df_friends <-  df_survey[row.names(unique(df_survey[,c("friend_id")])),]
+# Subset of data for movies table, add movie_id column
+df_movies <- select(df_survey, movie_name)
+df_movies <- distinct(df_movies, movie_name)
+df_movies$movie_id <- seq.int(nrow(df_movies))
 
-df_friends
-
-dbWriteTable(conn = con, 
-             name = "test_movies2", 
-             value = df_survey, field.types = null)
-
-dbGetQuery(con, "SELECT * FROM test_movies2;")
-
-# Insert values into friends table
-movie_rating_values <- paste0(apply(df_survey, 1, 
-                       function(x) paste0("(", paste0(x, collapse = ", "), ")")), 
-                       collapse = ", ")
-movie_rating_values <- str_replace_all(values, "NA", "null")
-
-dbSendStatement(con, paste0("INSERT INTO friends_movie_ratings2 (friend_id, movie_id, movie_rating) VALUES ", movie_rating_values, ";"))
-
-
+# Subset of data for friends_movie_ratings table, join dfs for IDs
+df_ratings <- left_join(df_survey, df_friends, by = "friend_name")
+df_ratings <- left_join(df_ratings, df_movies, by = "movie_name")
+df_ratings <- select(df_ratings, friend_id, movie_id, movie_rating)
 
 # Insert values into friends table
 friends_values <- paste0(apply(df_friends, 1, 
-                       function(x) paste0("(", "null, '", paste0(x, collapse = ", "), "')")), 
+                       function(x) paste0("(", "'", paste0(x, collapse = "', "), ")")), 
                        collapse = ", ")
 
+dbSendStatement(con, paste0("INSERT INTO friends (friend_name, friend_id) VALUES ", 
+                            friends_values, ";"))
 
-paste0(apply(dummy, 1, function(x) paste0("('", paste0(x, collapse = "', '"), "')")), collapse = ", ")
+# Insert values into movies table
+movies_values <- paste0(apply(df_movies, 1, 
+                       function(x) paste0("(", "'", paste0(x, collapse = "', "), ")")), 
+                       collapse = ", ")
 
-friends_values
-friends_values <- str_replace_all(values, "NA", "null")
+dbSendStatement(con, paste0("INSERT INTO movies (movie_name, movie_id) VALUES ", 
+                            movies_values, ";"))
 
-dbSendStatement(con, paste0("INSERT INTO friends2 (friend_id, friend_name) VALUES ", friends_values, ";"))
+# Insert values into movie_rating_values table
+movie_rating_values <- paste0(apply(df_ratings, 1, 
+                       function(x) paste0("(", "", paste0(x, collapse = ", "), ")")), 
+                       collapse = ", ")
+movie_rating_values <- str_replace_all(movie_rating_values, "NA", "null")
 
-
+dbSendStatement(con, paste0("INSERT INTO friends_movie_ratings 
+                            (friend_id, movie_id, movie_rating) VALUES ", 
+                            movie_rating_values, ";"))
 
 ```
 
 
 ### Query tables
 
-```{r query-db, results = True}
+```{r query-db}
+
 # Query all columns from each table
 dbGetQuery(con, "SELECT * FROM friends;")
 dbGetQuery(con, "SELECT * FROM movies;")
 dbGetQuery(con, "SELECT * FROM friends_movie_ratings;")
-
 
 # (skip if using SQLite) View standardized ratings
 dbGetQuery(con, "WITH
@@ -143,9 +148,9 @@ dbGetQuery(con, "WITH
                 SELECT  friend_id, 
                         movie_id, 
                         movie_rating,
-              		      abs(movie_rating - ratings_stats.mean) / ratings_stats.sd as rating_z_score
+              		      abs(movie_rating - ratings_stats.mean) / 
+                            ratings_stats.sd as rating_z_score
                 FROM friends_movie_ratings JOIN ratings_stats;")
-
 
 # View all our data columns together
 dbGetQuery(con, "SELECT friends_movie_ratings.friend_id, friends.friend_name, 
@@ -154,7 +159,6 @@ dbGetQuery(con, "SELECT friends_movie_ratings.friend_id, friends.friend_name,
                 FROM friends_movie_ratings
                 JOIN friends ON friends_movie_ratings.friend_id=friends.friend_id
                 JOIN movies ON friends_movie_ratings.movie_id=movies.movie_id;")
-
 
 # View only friend_name, movie_name, and movie_rating
 dbGetQuery(con, "SELECT friends.friend_name, 
@@ -169,9 +173,11 @@ dbGetQuery(con, "SELECT friends.friend_name,
 
 ### Write to data frame and CSV
 
-```{r df-csv}
+```{r df-reco}
+
 # Write SQL query to data frame
-df_fmr <- data.frame(dbGetQuery(con, "SELECT friends_movie_ratings.friend_id, friends.friend_name, 
+df_fmr <- data.frame(dbGetQuery(con, "SELECT friends_movie_ratings.friend_id, 
+                        friends.friend_name, 
                         friends_movie_ratings.movie_id, movies.movie_name,
                         friends_movie_ratings.movie_rating
                 FROM friends_movie_ratings
@@ -179,20 +185,29 @@ df_fmr <- data.frame(dbGetQuery(con, "SELECT friends_movie_ratings.friend_id, fr
                 JOIN movies ON friends_movie_ratings.movie_id=movies.movie_id;"))
 
 # Disconnect from database
-dbDisconnect()
+dbDisconnect(con)
 
 # Preview the data frame
-head(df_fmr)
+head(df_fmr, 20)
 
+# Find the movie with the highest avg. rating
+df_fmr_no_nas <- df_fmr %>% filter(!is.na(movie_rating))
+df_avg_rating <- aggregate(movie_rating ~ movie_id, df_fmr_no_nas, mean)
+top_rated_movie <- df_avg_rating[order(-df_avg_rating$movie_rating),][1:1,]
+top_rated_movie_id <- select(top_rated_movie, movie_id)[1,]
 
-# Write the data frame to a csv
-write.csv(df_fmr, "friends_movie_ratings.csv")
+# See if any of my friends have not seen the top rated movie and if so, recommend it
+df_fmr_only_nas <- df_fmr %>% filter(is.na(movie_rating) & movie_id == top_rated_movie_id)
+df_fmr_only_nas
+
 ```
 
 
 ### Conclusions and Recommendations 
 
+This pipeline, while fairly scalable, would likely need to be tweaked to better automate the process of loading CSV data into SQL tables. Currently, manual attention needs to be put into the data manipulation tasks to account for data type (e.g. int, str). Some built-in DBI functions handle the conversions for you, but if utilized, force you to give up some control of the table schema. Ultimately, decided to use the more explicit SQL insertions over the abstracted dbWriteTable function to demonstrate understanding of SQL.
 
+In regards to recommendations, the approach was to calculate the average rating for each movie, then determine if any friends have not seen the top rated movie. It turns out two friends, Rachel Jennings and Tom Phillip, did not see the top movie, Parasite. Therefore, Parasite will be recommended to them.
 
 
 * * *
